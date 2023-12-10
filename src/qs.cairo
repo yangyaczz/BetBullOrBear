@@ -51,6 +51,9 @@ trait IPragmaABI<TContractState> {
         timestamp: u64,
         aggregation_mode: AggregationMode,
     ) -> (Checkpoint, u64);
+    fn set_checkpoint(
+        ref self: TContractState, data_type: DataType, aggregation_mode: AggregationMode
+    );
 }
 
 #[starknet::interface]
@@ -59,6 +62,8 @@ trait HackTemplateABI<TContractState> {
     fn get_bet_detail(self: @TContractState, key: u64) -> BetDetail;
     fn check_win(self: @TContractState,bet_detail_id: u64) -> bool;
     fn claim(ref self: TContractState, bet_detail_id: u64);
+    fn set_cp(ref self: TContractState);
+    fn withdraw_fund(ref self: TContractState, amount: u256);
 }
 
 #[starknet::interface]
@@ -88,6 +93,7 @@ mod HackTemplate {
 
     #[storage]
     struct Storage {
+        owner: ContractAddress,
         pragma_contract: ContractAddress,
         token: IERC20Dispatcher,
         id: u64,
@@ -96,8 +102,9 @@ mod HackTemplate {
     }
 
     #[constructor]
-    fn constructor(ref self: ContractState, pragma_address: ContractAddress, token: ContractAddress) 
+    fn constructor(ref self: ContractState, init_owner: ContractAddress, pragma_address: ContractAddress, token: ContractAddress) 
     {
+        self.owner.write(init_owner);
         self.pragma_contract.write(pragma_address);
         self.token.write(IERC20Dispatcher { contract_address: token });
         self.id.write(0);
@@ -149,9 +156,13 @@ mod HackTemplate {
                 contract_address: self.pragma_contract.read()
             };
 
-            let (checkpoint, timestamp) = oracle_dispatcher.get_last_checkpoint_before(DataType::SpotEntry(ETH_USD), bet_detail.end_timestamp, AggregationMode::Median(()));
+            assert(get_block_timestamp() <= bet_detail.end_timestamp + 600, 'exceed timestamp');
 
-            let final_price = checkpoint.value;
+            // let (checkpoint, timestamp) = oracle_dispatcher.get_last_checkpoint_before(DataType::SpotEntry(ETH_USD), bet_detail.end_timestamp, AggregationMode::Median(()));
+            let output: PragmaPricesResponse = oracle_dispatcher
+                .get_data_median(DataType::SpotEntry(ETH_USD));
+
+            let final_price = output.price;
             let entry_price = bet_detail.price;
             
             if (bet_detail.direction == true) {
@@ -167,6 +178,14 @@ mod HackTemplate {
                     return true;
                 }
             }
+        }
+
+        fn set_cp(ref self: ContractState) {
+            let oracle_dispatcher = IPragmaABIDispatcher {
+                contract_address: self.pragma_contract.read()
+            };
+
+            oracle_dispatcher.set_checkpoint(DataType::SpotEntry(ETH_USD), AggregationMode::Median(()));
         }
 
         fn claim(ref self: ContractState, bet_detail_id: u64) {
@@ -192,6 +211,19 @@ mod HackTemplate {
 
             // transfer reward
             self.token.read().transfer(caller, bet_detail.amount * self.odd.read() / 1000);
+        }
+
+        fn withdraw_fund(ref self: ContractState, amount: u256) {
+            self.only_owner();
+            self.token.read().transfer(self.owner.read(), amount);
+        }
+    }
+
+    #[generate_trait]
+    impl PrivateMethods of PrivateMethodsTrait {
+        fn only_owner(self: @ContractState) {
+            let caller = get_caller_address();
+            assert(caller == self.owner.read(), 'Caller is not the owner');
         }
     }
 }
